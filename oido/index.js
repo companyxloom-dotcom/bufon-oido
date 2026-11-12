@@ -187,8 +187,20 @@ async function procesar(s, guild, userId, pcm) {
   if (s.clips.length >= MAX_CLIPS_MIN) { dbg('demasiadas frases por minuto: ignorada'); return; }
   s.clips.push(ahora);
 
+  const wav = U.aWav(mono);
+  if (process.env.OIDO_AUDIO === '1' && (s.volcados = s.volcados || 0) < 4) { // DIAGNOSTICO: manda el audio que el oído recibió, por MENSAJE PRIVADO (nunca al chat)
+    s.volcados++;
+    let dest = null;
+    if (process.env.OIDO_AUDIO_CANAL) dest = await client.channels.fetch(process.env.OIDO_AUDIO_CANAL).catch(() => null); // opcional: un canal aparte
+    else { const u = s.userId && await client.users.fetch(s.userId).catch(() => null); dest = u && await u.createDM().catch(() => null); } // por defecto: DM a quien activó b!escuchar
+    if (dest) await dest.send({ content: `🔧 Diagnóstico: esto es lo que oí de <@${userId}> (volumen ${vol}, ${Math.round(mono.length / 32)} ms). ¿Se oye tu voz normal, rápida, lenta o puro ruido?`, files: [{ attachment: wav, name: 'oido.wav' }], allowedMentions: { parse: [] } }).catch((e) => console.error('[oido] diagnóstico:', e.message));
+    else console.error('[oido] diagnóstico: no pude mandar el audio (¿tienes los mensajes privados cerrados? Puedes poner OIDO_AUDIO_CANAL con el ID de un canal aparte)');
+  }
   let texto = '';
-  try { texto = (await ia.transcribir(U.aWav(mono))).trim(); }
+  try {
+    texto = (await ia.transcribir(wav)).trim();
+    if (!texto && process.env.OIDO_AUDIO === '1') texto = (await ia.transcribir(wav, { sinPrompt: true })).trim(); // reintento sin pista (solo en diagnóstico)
+  }
   catch (e) { console.error('[oido] voz->texto:', String(e.message).slice(0, 120)); return; }
   dbg(`Whisper entendió (${userId}, volumen ${vol}): "${texto}"`);
   if (texto.length < 2) return;

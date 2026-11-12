@@ -245,7 +245,7 @@ async function onMessage(msg, client) {
 // Voz -> texto con Whisper de Groq (gratis; usa las mismas claves GROQ_API_KEY y las rota igual).
 // Opcional: IA_MODELO_STT (por defecto whisper-large-v3-turbo).
 const STT_PROMPT = 'Bufón, hola Bufón, oye Bufón. Conversación en español en una llamada de Discord.';
-async function transcribir(wav) {
+async function transcribir(wav, opts = {}) {
   let ultimo;
   for (const key of claves('GROQ_API_KEY')) {
     const id = 'stt:' + key.slice(-6);
@@ -256,14 +256,19 @@ async function transcribir(wav) {
       form.append('model', process.env.IA_MODELO_STT || 'whisper-large-v3-turbo');
       form.append('language', 'es');
       form.append('temperature', '0');
-      form.append('response_format', 'json');
-      form.append('prompt', STT_PROMPT);
+      form.append('response_format', 'verbose_json');
+      if (!opts.sinPrompt) form.append('prompt', STT_PROMPT);
       const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
         method: 'POST', headers: { authorization: `Bearer ${key}` }, body: form, signal: AbortSignal.timeout(25000),
       });
       if (!res.ok) throw new Error(`${res.status}: ${(await res.text()).slice(0, 160)}`);
       const data = await res.json();
-      return String((data && data.text) || '').trim();
+      const texto = String((data && data.text) || '').trim();
+      if (!texto) {
+        const seg = (data && data.segments) || [];
+        console.log(`[ia:stt] Whisper devolvió texto vacío (duración ${data && data.duration}s, segmentos ${seg.length}, prob. de no-voz ${seg.length ? Number(seg[0].no_speech_prob).toFixed(2) : 'n/a'}${opts.sinPrompt ? ', sin prompt' : ''})`);
+      }
+      return texto;
     } catch (e) { ultimo = e; enfriar({ id }, e); console.error('[ia:stt]', e.message.slice(0, 120)); }
   }
   if (ultimo) throw ultimo;
