@@ -1,0 +1,41 @@
+GUIA PARA MONTAR EL OIDO EN RENDER (una sola vez)
+==================================================
+Necesitas: cuenta de GitHub (github.com) y cuenta de Render (render.com; puedes entrar con GitHub). Todo gratis, sin tarjeta para el plan Free.
+
+A) SUBIR EL CODIGO A GITHUB
+ 1. En github.com: botón "+" > New repository. Nombre: bufon-oido. Márcalo PRIVATE. Create repository.
+ 2. Descomprime el ZIP. Entra a la carpeta  render-oido  (tiene: package.json, src/, oido/).
+ 3. En tu repositorio: "uploading an existing file". Arrastra el CONTENIDO de render-oido (package.json y las carpetas src y oido, no la carpeta render-oido en sí).
+    Debe verse package.json, src/db.js, src/ia.js, oido/index.js, oido/utils.js. Commit changes.
+ NO subas ningún .env ni tokens a GitHub.
+
+B) CREAR EL SERVICIO EN RENDER
+ 1. render.com > New > Web Service > conecta tu GitHub y elige bufon-oido.
+ 2. Name: bufon-oido (anota la dirección que te da, tipo https://bufon-oido.onrender.com).
+ 3. Runtime: Node. Build Command: npm install    Start Command: npm start    Instance Type: Free.
+ 4. Environment Variables (Add):
+      DISCORD_TOKEN   = el MISMO token del Bufón
+      DATABASE_URL    = la MISMA cadena de Neon
+      OIDO_SECRET     = una clave larga inventada por ti (ej. 30 letras y números al azar)
+      GROQ_API_KEY    = tus claves de Groq (las mismas de Wispbyte, separadas por coma si son varias)
+      GEMINI_API_KEY / OPENROUTER_API_KEY = opcionales, igual que en Wispbyte (para que la IA tenga respaldo)
+      NODE_VERSION    = 20
+ 5. Create Web Service. Espera a que diga "Live". En Logs debe salir: "[oido] listo como ... (solo oigo: no leo comandos)".
+
+C) AVISAR A WISPBYTE
+ 1. Sube a Wispbyte los archivos "(nuevo)" de la parte 54 (lista en LEEME-parte54.txt) y quítales " (nuevo)".
+ 2. En el .env de Wispbyte agrega:
+      OIDO_URL    = la dirección de Render (https://bufon-oido.onrender.com)
+      OIDO_SECRET = EXACTAMENTE la misma clave que pusiste en Render
+ 3. Reinicia el bot en Wispbyte.
+
+D) PROBAR
+ 1. Entra a un canal de voz y escribe  b!escuchar . Debe decir "Despertando el oído...". Al minuto aparece "👂 Ya te escucho".
+ 2. Di "Bufón, ¿cómo estás?" y mira el chat. Para apagar: b!escuchar off.
+ Si algo falla, copia lo que salga en los Logs de Render y pásamelo.
+
+NOTAS
+ - Permisos del bot en el canal de voz: Ver canal y Conectar (no necesita hablar).
+ - No hace falta activar nada nuevo en el Developer Portal.
+ - Render Free se duerme a los 15 min sin visitas; el oído se despierta solo cuando escribes b!escuchar y se mantiene vivo mientras haya llamada.
+ - Si en el futuro cambias ia.js en Wispbyte, copia el cambio también a render-oido/src/ia.js (el oído usa el mismo cerebro).

@@ -1,0 +1,18 @@
+{
+  "name": "bufon-oido",
+  "version": "1.0.0",
+  "description": "El oído del Bufón: escucha la llamada y responde por chat (servicio para Render)",
+  "main": "oido/index.js",
+  "scripts": { "start": "node oido/index.js" },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5",
+    "pg": "^8.13.0",
+    "@discordjs/voice": ">=0.18.0",
+    "@snazzah/davey": ">=0.1.6",
+    "opusscript": ">=0.0.8",
+    "prism-media": "^1.3.5",
+    "libsodium-wrappers": ">=0.7.13"
+  }
+}
