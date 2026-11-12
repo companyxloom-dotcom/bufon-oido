@@ -8,9 +8,9 @@ const http = require('http');
 const crypto = require('crypto');
 const { Client, GatewayIntentBits } = require('discord.js');
 
-let V, prism;
-try { V = require('@discordjs/voice'); prism = require('prism-media'); }
-catch (e) { console.error('[oido] Faltan las librerias de voz (@discordjs/voice, prism-media, opusscript). npm install las trae:', e.message); process.exit(1); }
+let V, OpusScript;
+try { V = require('@discordjs/voice'); OpusScript = require('opusscript'); }
+catch (e) { console.error('[oido] Faltan las librerias de voz (@discordjs/voice, opusscript). npm install las trae:', e.message); process.exit(1); }
 
 const db = require('../src/db');
 const ia = require('../src/ia');
@@ -30,7 +30,9 @@ const RMS_MIN = 250;            // volumen minimo (descarta ruido/silencio sin g
 const MAX_CLIPS_MIN = 15;       // limite de frases por minuto y servidor hacia Whisper (cupo gratis ~20/min)
 const VENTANA_MS = 15000;       // tras responderle a alguien, le sigue contestando 15 s sin repetir "Bufón"
 const VACIA_CHEQUEOS = 5;       // minutos solo en la llamada antes de apagarse
-const ECO = process.env.OIDO_ECO !== '0'; // muestra lo que entendio ("🎙️ ...") encima de la respuesta
+const ECO = process.env.OIDO_ECO !== '0';
+const DEBUG = process.env.OIDO_DEBUG !== '0'; // registros de diagnostico en los Logs (ponle OIDO_DEBUG=0 para silenciarlos)
+const dbg = (...a) => { if (DEBUG) console.log('[oido]', ...a); }; // muestra lo que entendio ("🎙️ ...") encima de la respuesta
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
 const sessions = new Map(); // guildId -> { guildId, channelId, textId, userId, connection, listening, ventana, clips, vacios, rejoins, closing }
@@ -67,7 +69,9 @@ async function conectar(s, guild) {
   });
   s.connection = connection;
   connection.on('error', (e) => console.error('[oido] conexion de voz:', e.message));
+  connection.on('stateChange', (o, n) => dbg(`voz: ${o.status} -> ${n.status}`));
   await V.entersState(connection, V.VoiceConnectionStatus.Ready, 30000);
+  dbg('conexion de voz LISTA (Ready). Esperando que alguien hable...');
 
   connection.on(V.VoiceConnectionStatus.Disconnected, async () => {
     if (s.closing || s.connection !== connection) return;
@@ -132,48 +136,65 @@ function oir(s, guild) {
   const receiver = s.connection.receiver;
   receiver.speaking.on('start', (userId) => {
     if (s.closing || s.listening.has(userId)) return;
+    s.ultimoAudio = Date.now();
+    dbg(`Discord dice que habla ${userId}`);
     const vs = guild.voiceStates.cache.get(userId);
     if (vs && vs.member && vs.member.user.bot) return;
     s.listening.add(userId);
 
     const opus = receiver.subscribe(userId, { end: { behavior: V.EndBehaviorType.AfterSilence, duration: SILENCE_MS } });
-    const dec = new prism.opus.Decoder({ rate: 48000, channels: 2, frameSize: 960 });
+    // Decodificamos paquete por paquete con try/catch: un paquete malo se salta y NO tumba toda la frase
+    // (antes usaba un decodificador de flujo que se moría al primer "invalid packet").
+    let dec;
+    try { dec = new OpusScript(48000, 2, OpusScript.Application.AUDIO); }
+    catch (e) { console.error('[oido] no pude crear el decodificador de Opus:', e.message); s.listening.delete(userId); return; }
     const chunks = [];
-    let bytes = 0, hecho = false;
+    let bytes = 0, buenos = 0, malos = 0, hecho = false;
     const fin = () => {
       if (hecho) return;
       hecho = true;
       s.listening.delete(userId);
+      try { dec.delete(); } catch {}
+      dbg(`captura de ${userId}: ${Math.round(bytes / 192)} ms de audio (paquetes buenos ${buenos}, inválidos ${malos})`);
+      if (malos > 0 && buenos === 0) console.error('[oido] TODOS los paquetes llegaron inválidos: casi seguro el audio llega cifrado (DAVE) y no se está descifrando. Revisa que @snazzah/davey esté instalado y actualizado.');
       procesar(s, guild, userId, Buffer.concat(chunks)).catch((e) => console.error('[oido] procesar:', e.message));
     };
-    dec.on('data', (c) => {
-      chunks.push(c); bytes += c.length;
-      if (bytes > MAX_MS * 192) { opus.unpipe(dec); opus.destroy(); dec.end(); } // 192 bytes por ms (48 kHz, estéreo, 16 bits)
+    opus.on('data', (pkt) => {
+      if (hecho) return;
+      try {
+        const pcm = dec.decode(pkt);
+        chunks.push(Buffer.from(pcm)); bytes += pcm.length; buenos++;
+      } catch (e) {
+        malos++;
+        if (malos === 1) dbg(`paquete de audio inválido (${pkt.length} bytes): ${String(e.message || e).slice(0, 80)}`);
+      }
+      if (bytes > MAX_MS * 192) { opus.destroy(); fin(); } // 192 bytes por ms (48 kHz, estéreo, 16 bits)
     });
-    dec.on('end', fin);
-    dec.on('close', fin);
-    dec.on('error', (e) => { console.error('[oido] decodificador:', e.message); fin(); });
-    opus.on('error', (e) => { console.error('[oido] audio:', e.message); try { dec.destroy(); } catch {} fin(); });
-    opus.pipe(dec);
+    opus.on('end', fin);
+    opus.on('close', fin);
+    opus.on('error', (e) => { console.error('[oido] audio:', e.message); fin(); });
   });
 }
 
 async function procesar(s, guild, userId, pcm) {
-  if (s.closing || pcm.length / 192 < MIN_MS) return;
+  if (s.closing) return;
+  if (pcm.length / 192 < MIN_MS) { dbg(`frase muy corta (${Math.round(pcm.length / 192)} ms): ignorada`); return; }
   const mono = U.monoDe48kEstereo(pcm);
-  if (U.rms(mono) < RMS_MIN) return;
+  const vol = Math.round(U.rms(mono));
+  if (vol < RMS_MIN) { dbg(`volumen muy bajo (${vol} < ${RMS_MIN}): ignorada`); return; }
   const ahora = Date.now();
   s.clips = s.clips.filter((t) => ahora - t < 60000);
-  if (s.clips.length >= MAX_CLIPS_MIN) return;
+  if (s.clips.length >= MAX_CLIPS_MIN) { dbg('demasiadas frases por minuto: ignorada'); return; }
   s.clips.push(ahora);
 
   let texto = '';
   try { texto = (await ia.transcribir(U.aWav(mono))).trim(); }
   catch (e) { console.error('[oido] voz->texto:', String(e.message).slice(0, 120)); return; }
+  dbg(`Whisper entendió (${userId}, volumen ${vol}): "${texto}"`);
   if (texto.length < 2) return;
 
   const enVentana = (s.ventana.get(userId) || 0) > Date.now();
-  if (!U.quiereHablar(texto) && !enVentana) return; // no le hablaron al Bufón
+  if (!U.quiereHablar(texto) && !enVentana) { dbg('no dijo "Bufón": no respondo'); return; } // no le hablaron al Bufón
   if (s.closing || !s.textId) return;
 
   const member = await guild.members.fetch(userId).catch(() => null);
@@ -186,7 +207,7 @@ async function procesar(s, guild, userId, pcm) {
   let out = '';
   try { out = await ia.hablarVoz({ guildId: guild.id, channelId: s.textId, userId, nombre, texto }); }
   catch (e) { console.error('[oido] IA:', String(e.message).slice(0, 120)); return; }
-  if (!out) return;
+  if (!out) { dbg('la IA no devolvió respuesta (cooldown, sin claves o IA_OFF)'); return; }
   s.ventana.set(userId, Date.now() + VENTANA_MS);
   const eco = ECO ? `> 🎙️ *${texto.replace(/[*_`>~|\\]/g, '').slice(0, 200)}*\n` : '';
   await ch.send({ content: `${eco}<@${userId}> ${out}`.slice(0, 1990), allowedMentions: { users: [userId] } }).catch((e) => console.error('[oido] enviar:', e.message));
@@ -202,6 +223,7 @@ async function tick() {
     await db.pool.query(`UPDATE oido_voz SET seen = NOW(), joined = TRUE WHERE guild_id = ANY($1) AND activo`, [[...sessions.keys()]]).catch(() => {});
   }
   if (tickN % 6 === 0) {                            // ~60 s: ¿me quedé solo?
+    for (const s of sessions.values()) dbg(`vivo: servidor ${s.guildId}, voz=${s.connection ? s.connection.state.status : 'sin conexion'}, ultimo audio recibido ${s.ultimoAudio ? Math.round((Date.now() - s.ultimoAudio) / 1000) + ' s atrás' : 'NUNCA'}`);
     for (const [gid, s] of [...sessions]) {
       const guild = client.guilds.cache.get(gid);
       const personas = guild ? guild.voiceStates.cache.filter((v) => v.channelId === s.channelId && v.id !== client.user.id && !(v.member && v.member.user.bot)).size : 0;
@@ -243,6 +265,7 @@ async function alListo() {
     activo BOOLEAN NOT NULL DEFAULT TRUE, joined BOOLEAN NOT NULL DEFAULT FALSE,
     since TIMESTAMPTZ NOT NULL DEFAULT NOW(), seen TIMESTAMPTZ NOT NULL DEFAULT NOW())`).catch((e) => console.error('[oido] tabla:', e.message));
   console.log(`[oido] listo como ${client.user.tag} (solo oigo: no leo comandos)`);
+  try { console.log('[oido] ' + V.generateDependencyReport().split('\n').join('\n[oido] ')); } catch {}
   listo();
   await sync(); // si Render se reinició con una sesión activa, vuelve a entrar
 }
